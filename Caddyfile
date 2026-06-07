@@ -1,0 +1,32 @@
+{
+    # Configurări globale
+    auto_https off      # RunPod oferă HTTPS la nivel de platformă; nu cerem cert local
+    admin off           # Dezactivăm admin API Caddy (defense in depth)
+}
+
+# Pas 2: proxy simplu fără auth.
+# Caddy ascultă pe :8080 (port public RunPod), forwardează la 127.0.0.1:9000 (wrapper local).
+:8080 {
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Liveness local Caddy — răspunde fără a trece prin wrapper.
+    # Util pentru orchestratoare / debugging rapid.
+    handle /caddy-health {
+        respond "ok" 200
+    }
+
+    # Tot restul → wrapper WhisperX
+    reverse_proxy 127.0.0.1:9000 {
+        # Audio mare + diarizare = durează mult; relaxăm toate timeout-urile la 6h.
+        transport http {
+            dial_timeout 30s
+            response_header_timeout 6h
+            read_timeout 6h
+            write_timeout 6h
+        }
+    }
+}
