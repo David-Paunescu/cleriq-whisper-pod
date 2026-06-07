@@ -1,0 +1,63 @@
+name: Build & Push Docker Image
+
+# Se ruleaza automat la fiecare push pe main + manual din tab-ul Actions.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout cod
+        uses: actions/checkout@v4
+
+      # Imaginea base (learnedmachine/whisperx-asr-service) e ~14.2 GB.
+      # Runner-ul GitHub Actions standard are doar ~14 GB disk liber — prea limitat.
+      # Acest step elibereaza ~30 GB sterand SDK-uri preinstalate inutile (Android, .NET, Haskell, etc).
+      - name: Elibereaza spatiu pe runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: davidp90
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Genereaza automat tag-urile pentru imaginea finala:
+      #   :latest                  — rolling pointer la ultimul build de pe main
+      #   :sha-<short_commit_sha>  — immutable, util pentru rollback la versiuni precise
+      - name: Genereaza tag-uri si labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: davidp90/cleriq-whisper-pod
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+
+      - name: Build & push imagine
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
