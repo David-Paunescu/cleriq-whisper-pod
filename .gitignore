@@ -1,0 +1,12 @@
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secretele NU intra in repo (token-ul Docker Hub sta in GitHub Secrets)
+.env
+*.local
+secrets/
