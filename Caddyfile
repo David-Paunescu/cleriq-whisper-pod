@@ -1,32 +1,65 @@
 {
-    # Configurări globale
-    auto_https off      # RunPod oferă HTTPS la nivel de platformă; nu cerem cert local
-    admin off           # Dezactivăm admin API Caddy (defense in depth)
-}
-
-# Pas 2: proxy simplu fără auth.
-# Caddy ascultă pe :8080 (port public RunPod), forwardează la 127.0.0.1:9000 (wrapper local).
-:8080 {
+    auto_https off
+    admin off
     log {
         output stdout
-        format console
-        level INFO
+        format json
     }
+}
 
-    # Liveness local Caddy — răspunde fără a trece prin wrapper.
-    # Util pentru orchestratoare / debugging rapid.
+:8080 {
+    # Health check public (fără auth) — folosit de monitoring extern.
     handle /caddy-health {
         respond "ok" 200
     }
 
-    # Tot restul → wrapper WhisperX
-    reverse_proxy 127.0.0.1:9000 {
-        # Audio mare + diarizare = durează mult; relaxăm toate timeout-urile la 6h.
-        transport http {
-            dial_timeout 30s
-            response_header_timeout 6h
-            read_timeout 6h
-            write_timeout 6h
+    # Defense in depth: dacă WHISPER_API_KEY_BACKUP nu e setat, matcher-ul @key_backup
+    # de mai jos s-ar expanda la `Bearer ` (gol). Interceptăm explicit aici, primul,
+    # ca să-l respingem cu 401 înainte să ajungă pe @key_backup gol.
+    @empty_bearer header Authorization "Bearer "
+    handle @empty_bearer {
+        respond "Unauthorized" 401
+    }
+
+    # Cheia primară (entrypoint refuză să pornească dacă lipsește — vezi cleriq-entrypoint.sh).
+    @key_primary header Authorization "Bearer {$WHISPER_API_KEY}"
+    handle @key_primary {
+        reverse_proxy 127.0.0.1:9000 {
+            transport http {
+                read_timeout 6h
+                write_timeout 6h
+                dial_timeout 30s
+            }
+        }
+    }
+
+    # Cheia backup (opțională — permite rotație fără downtime: setezi backup, schimbi primarul,
+    # restart pod, scoți backup-ul).
+    @key_backup header Authorization "Bearer {$WHISPER_API_KEY_BACKUP}"
+    handle @key_backup {
+        reverse_proxy 127.0.0.1:9000 {
+            transport http {
+                read_timeout 6h
+                write_timeout 6h
+                dial_timeout 30s
+            }
+        }
+    }
+
+    # Tot ce nu a făcut match până aici: 401.
+    handle {
+        respond "Unauthorized" 401
+    }
+
+    # Token redaction: ștergem header-ul Authorization din log-uri, ca să nu ajungă cheia
+    # în consola RunPod (vizibilă în UI și posibil exportată).
+    log {
+        output stdout
+        format filter {
+            wrap json
+            fields {
+                request>headers>Authorization delete
+            }
         }
     }
 }
