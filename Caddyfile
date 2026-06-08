@@ -2,10 +2,6 @@
     auto_https off
     admin off
 
-    # Plugin mholt/caddy-ratelimit nu e directive standard;
-    # spunem Caddy unde să-l plaseze în lanțul de handlers.
-    order rate_limit before reverse_proxy
-
     log {
         output stdout
         format json
@@ -14,71 +10,74 @@
 
 :8080 {
     # === Health check public ===
-    # Fără filter IP, fără auth, fără rate limit — accesibil de oriunde pentru monitoring extern.
-    # Plasat primul ca să răspundă chiar dacă restul cer auth+IP allowlist.
+    # În AFARA route block-ului → evaluat înainte de orice (rate limit, IP filter, auth).
+    # Accesibil de oriunde pentru monitoring extern.
     handle /caddy-health {
         respond "ok" 200
     }
 
     # === IP Allowlist (Pas 4) ===
-    # IP filter ÎNAINTE de Bearer auth: ascundem existența auth-ului față de IP-uri neautorizate
-    # (primesc 403 fără să afle că ar putea încerca cu un Bearer token).
+    # În AFARA route block-ului → 403 fast path înainte ca atacatorul să aibă șansa
+    # să afle că există auth sau să consume quota rate-limit.
     @from_disallowed_ip not remote_ip {$CLERIQ_ALLOWED_IPS}
     handle @from_disallowed_ip {
         respond "Forbidden" 403
     }
 
-    # === Rate limit per Bearer token (Pas 5) ===
-    # Cheia = header-ul complet "Bearer <key>". Astfel:
-    # - O cheie validă are propriul bucket (10 req/min — nu împărtășește cu altcineva).
-    # - O cheie greșită are bucket separat (atacatorul nu poate consuma quota celei valide
-    #   și nici nu poate brute-force, e tot limitat la 10/min).
-    # @not_health = defense in depth — /caddy-health e deja interceptat mai sus de `handle`,
-    # dar matcher-ul explicit elimină orice ambiguitate de ordering în Caddy.
-    @not_health not path /caddy-health
-    rate_limit @not_health {
-        zone bearer_zone {
-            key {http.request.header.authorization}
-            events 10
-            window 1m
-        }
-    }
-
-    # === Bearer auth (Pas 3) ===
-    # Defense in depth: dacă WHISPER_API_KEY_BACKUP nu e setat, matcher-ul @key_backup
-    # s-ar expanda la `Bearer ` (gol) — interceptat aici primul.
-    @empty_bearer header Authorization "Bearer "
-    handle @empty_bearer {
-        respond "Unauthorized" 401
-    }
-
-    # Cheia primară (obligatorie — entrypoint.sh refuză să pornească fără ea).
-    @key_primary header Authorization "Bearer {$WHISPER_API_KEY}"
-    handle @key_primary {
-        reverse_proxy 127.0.0.1:9000 {
-            transport http {
-                read_timeout 6h
-                write_timeout 6h
-                dial_timeout 30s
+    # === Restul logicii (rate limit + Bearer auth) ===
+    # `route` block = ordine EXPLICITĂ declarată, fără inferență globală.
+    # Plugin-ul rate_limit funcționează predictibil aici (decizie Pas 5).
+    route {
+        # === Rate limit per Bearer token (Pas 5) ===
+        # Primul în route → declanșează 429 ÎNAINTE de orice match Bearer.
+        # Cheia = header-ul complet "Bearer <key>":
+        # - O cheie validă are propriul bucket (10 req/min — nu împărtășește cu altcineva).
+        # - O cheie greșită are bucket separat (atacator nu poate consuma quota celei valide
+        #   și nici nu poate brute-force, tot e limitat la 10/min).
+        rate_limit {
+            zone bearer_zone {
+                key {http.request.header.authorization}
+                events 10
+                window 1m
             }
         }
-    }
 
-    # Cheia backup (opțională — pentru rotație fără downtime).
-    @key_backup header Authorization "Bearer {$WHISPER_API_KEY_BACKUP}"
-    handle @key_backup {
-        reverse_proxy 127.0.0.1:9000 {
-            transport http {
-                read_timeout 6h
-                write_timeout 6h
-                dial_timeout 30s
+        # === Bearer auth (Pas 3) ===
+        # Defense in depth: dacă WHISPER_API_KEY_BACKUP nu e setat, matcher-ul @key_backup
+        # s-ar expanda la `Bearer ` (gol) — interceptat aici primul.
+        @empty_bearer header Authorization "Bearer "
+        handle @empty_bearer {
+            respond "Unauthorized" 401
+        }
+
+        # Cheia primară (obligatorie — entrypoint.sh refuză să pornească fără ea).
+        @key_primary header Authorization "Bearer {$WHISPER_API_KEY}"
+        handle @key_primary {
+            reverse_proxy 127.0.0.1:9000 {
+                transport http {
+                    read_timeout 6h
+                    write_timeout 6h
+                    dial_timeout 30s
+                }
             }
         }
-    }
 
-    # Fallback: Bearer lipsă, cheie greșită, etc. → 401.
-    handle {
-        respond "Unauthorized" 401
+        # Cheia backup (opțională — pentru rotație fără downtime).
+        @key_backup header Authorization "Bearer {$WHISPER_API_KEY_BACKUP}"
+        handle @key_backup {
+            reverse_proxy 127.0.0.1:9000 {
+                transport http {
+                    read_timeout 6h
+                    write_timeout 6h
+                    dial_timeout 30s
+                }
+            }
+        }
+
+        # Fallback: Bearer lipsă, cheie greșită, etc. → 401.
+        handle {
+            respond "Unauthorized" 401
+        }
     }
 
     # Token redaction: header Authorization șters complet din log-uri.
