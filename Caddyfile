@@ -1,6 +1,11 @@
 {
     auto_https off
     admin off
+
+    # Plugin mholt/caddy-ratelimit nu e directive standard;
+    # spunem Caddy unde să-l plaseze în lanțul de handlers.
+    order rate_limit before reverse_proxy
+
     log {
         output stdout
         format json
@@ -9,21 +14,34 @@
 
 :8080 {
     # === Health check public ===
-    # Fără filter IP, fără auth — accesibil de oriunde pentru monitoring extern.
+    # Fără filter IP, fără auth, fără rate limit — accesibil de oriunde pentru monitoring extern.
     # Plasat primul ca să răspundă chiar dacă restul cer auth+IP allowlist.
     handle /caddy-health {
         respond "ok" 200
     }
 
     # === IP Allowlist (Pas 4) ===
-    # CLERIQ_ALLOWED_IPS = listă IP-uri/CIDR separate prin spațiu.
-    # entrypoint.sh setează default "0.0.0.0/0 ::/0" (allow all) dacă env var-ul lipsește.
-    # Producție: setează env var la IP-ul fix al serverului Cleriq.
     # IP filter ÎNAINTE de Bearer auth: ascundem existența auth-ului față de IP-uri neautorizate
     # (primesc 403 fără să afle că ar putea încerca cu un Bearer token).
     @from_disallowed_ip not remote_ip {$CLERIQ_ALLOWED_IPS}
     handle @from_disallowed_ip {
         respond "Forbidden" 403
+    }
+
+    # === Rate limit per Bearer token (Pas 5) ===
+    # Cheia = header-ul complet "Bearer <key>". Astfel:
+    # - O cheie validă are propriul bucket (10 req/min — nu împărtășește cu altcineva).
+    # - O cheie greșită are bucket separat (atacatorul nu poate consuma quota celei valide
+    #   și nici nu poate brute-force, e tot limitat la 10/min).
+    # @not_health = defense in depth — /caddy-health e deja interceptat mai sus de `handle`,
+    # dar matcher-ul explicit elimină orice ambiguitate de ordering în Caddy.
+    @not_health not path /caddy-health
+    rate_limit @not_health {
+        zone bearer_zone {
+            key {http.request.header.authorization}
+            events 10
+            window 1m
+        }
     }
 
     # === Bearer auth (Pas 3) ===
@@ -63,7 +81,7 @@
         respond "Unauthorized" 401
     }
 
-    # Token redaction (Pas 6 implicit): header Authorization șters complet din log-uri.
+    # Token redaction: header Authorization șters complet din log-uri.
     log {
         output stdout
         format filter {
