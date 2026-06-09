@@ -211,17 +211,18 @@ async def transcribe_audio(
         logger.info("Starting transcription...")
         audio = whisperx.load_audio(temp_audio_path)
 
-# FIX (Cleriq): WhisperX 3.x .transcribe() does NOT accept initial_prompt as kwarg.
-        # The prompt is silent-dropped (transformers.Pipeline.__call__ **kwargs sink).
-        # Correct path: set whisper_model.options.initial_prompt (TranscriptionOptions
-        # dataclass field) BEFORE calling transcribe(), reset in finally to avoid leaking
-        # to next request on the cached/shared model. Safe with GPU_CONCURRENCY=1 (the
-        # async semaphore in simple-mode queue serializes requests).
-        prompt_was_set = False
+# FIX (Cleriq): WhisperX 3.x .transcribe() does NOT accept initial_prompt as kwarg
+        # (silent-dropped via transformers.Pipeline.__call__ **kwargs). Direct attribute
+        # mutation on whisper_model.options also silently fails in WhisperX 3.7.4 — cause
+        # unknown (likely Pipeline __setattr__ side effects or implicit dataclass copy
+        # during pipeline init). The official WhisperX pattern (see asr.py:256, 285) uses
+        # dataclasses.replace() + reassign on self.options. Safe with GPU_CONCURRENCY=1.
+        from dataclasses import replace
+        original_options = None
         if initial_prompt:
-            whisper_model.options.initial_prompt = initial_prompt
-            prompt_was_set = True
-            logger.info(f"Applied initial_prompt ({len(initial_prompt)} chars) to model.options")
+            original_options = whisper_model.options
+            whisper_model.options = replace(whisper_model.options, initial_prompt=initial_prompt)
+            logger.info(f"Applied initial_prompt ({len(initial_prompt)} chars) via dataclasses.replace()")
 
         try:
             result = whisper_model.transcribe(
@@ -231,9 +232,9 @@ async def transcribe_audio(
                 task=task
             )
         finally:
-            if prompt_was_set:
-                whisper_model.options.initial_prompt = None
-                logger.debug("Reset initial_prompt on model.options")
+            if original_options is not None:
+                whisper_model.options = original_options
+                logger.debug("Restored original model.options")
 
         detected_language = result.get("language", language or "en")
         logger.info(f"Transcription complete. Detected language: {detected_language}")
