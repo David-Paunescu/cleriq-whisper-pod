@@ -23,6 +23,10 @@ COPY Caddyfile /etc/caddy/Caddyfile
 COPY cleriq-entrypoint.sh /usr/local/bin/cleriq-entrypoint.sh
 RUN chmod +x /usr/local/bin/cleriq-entrypoint.sh
 
+# Patch upstream main.py: WhisperX 3.x silent-drops initial_prompt as kwarg to .transcribe().
+# Our patched version sets it on whisper_model.options.initial_prompt (correct path).
+COPY app_main.py /workspace/app/main.py
+
 # Caddy ascultă pe 8080 (port public RunPod); wrapper rămâne intern pe 9000.
 EXPOSE 8080
 
